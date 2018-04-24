@@ -36,17 +36,20 @@ Parameter Binding Verification Plugin for Struct Handler.
 
 tag   |   key    | required |     value     |   desc
 ------|----------|----------|---------------|----------------------------------
-param |    query    | no |     -      | It indicates that the parameter is from the URI query part, else the parameter is from body. e.g. `/a/b?x={query}`
+param |   query    | no |  (name e.g.`id`)  | It indicates that the parameter is from the URI query part. e.g. `/a/b?x={query}`
+param |   swap    | no |  (name e.g.`id`)  | It indicates that the parameter is from the context swap.
 param |   desc   |      no      |     (e.g.`id`)   | Parameter Description
-param |   len    |      no      |   (e.g.`3:6``3`)  | The length of the string type parameter
-param |   range  |      no      |   (e.g.`0:10`)   | The range of parameters for the numeric type
+param |   len    |      no      |   (e.g.`3:6`)  | Length range [a,b] of parameter's value
+param |   range  |      no      |   (e.g.`0:10`)   | Numerical range [a,b] of parameter's value
 param |  nonzero |      no      |    -    | Not allowed to zero
 param |  regexp  |      no      |   (e.g.`^\w+$`)  | Regular expression validation
-param |   err    |      no      |(e.g.`wrong password format`)| Custom error message
+param |   rerr   |      no      |(e.g.`100002:wrong password format`)| Custom error code and message
 
-**NOTES**:
+NOTES:
 * `param:"-"` means ignore
 * Encountered untagged exportable anonymous structure field, automatic recursive resolution
+* Parameter name is the name of the structure field converted to snake format
+* If the parameter is not from `query` or `swap`, it is the default from the body
 
 - Field-Types
 
@@ -68,13 +71,15 @@ uint64  |  []uint64  |
 float32 |  []float32 |
 float64 |  []float64 |
 */
-
-// StructArgsBinder a plugin that binds and validates structure type parameters.
-type StructArgsBinder struct {
-	binders        map[string]*Params
-	bindErrCode    int32
-	bindErrMessage string
-}
+type (
+	// StructArgsBinder a plugin that binds and validates structure type parameters.
+	StructArgsBinder struct {
+		binders map[string]*Params
+		errFunc ErrorFunc
+	}
+	// ErrorFunc creates an relational error.
+	ErrorFunc func(handlerName, paramName, reason string) *tp.Rerror
+)
 
 var (
 	_ tp.PostRegPlugin          = new(StructArgsBinder)
@@ -82,18 +87,35 @@ var (
 )
 
 // NewStructArgsBinder creates a plugin that binds and validates structure type parameters.
-func NewStructArgsBinder(bindErrCode int32, bindErrMessage string) *StructArgsBinder {
-	return &StructArgsBinder{
-		binders:        make(map[string]*Params),
-		bindErrCode:    bindErrCode,
-		bindErrMessage: bindErrMessage,
+func NewStructArgsBinder(fn ErrorFunc) *StructArgsBinder {
+	s := &StructArgsBinder{
+		binders: make(map[string]*Params),
+		errFunc: fn,
 	}
+	s.SetErrorFunc(fn)
+	return s
 }
 
 var (
 	_ tp.PostRegPlugin          = new(StructArgsBinder)
 	_ tp.PostReadPullBodyPlugin = new(StructArgsBinder)
 )
+
+// SetErrorFunc sets the binding or balidating error function.
+// Note: If fn=nil, set as default.
+func (s *StructArgsBinder) SetErrorFunc(fn ErrorFunc) {
+	if fn != nil {
+		s.errFunc = fn
+		return
+	}
+	s.errFunc = func(handlerName, paramName, reason string) *tp.Rerror {
+		return tp.NewRerror(
+			100001,
+			"Invalid Parameter",
+			fmt.Sprintf(`{"handler": %q, "param": %q, "reason": %q}`, handlerName, paramName, reason),
+		)
+	}
+}
 
 // Name returns the plugin name.
 func (*StructArgsBinder) Name() string {
@@ -105,7 +127,7 @@ func (s *StructArgsBinder) PostReg(h *tp.Handler) error {
 	if h.ArgElemType().Kind() != reflect.Struct {
 		return nil
 	}
-	params := newParams(h.Name())
+	params := newParams(h.Name(), s)
 	err := params.addFields([]int{}, h.ArgElemType(), h.NewArgValue().Elem())
 	if err != nil {
 		tp.Fatalf("%v", err)
@@ -121,9 +143,9 @@ func (s *StructArgsBinder) PostReadPullBody(ctx tp.ReadCtx) *tp.Rerror {
 		return nil
 	}
 	bodyValue := reflect.ValueOf(ctx.Input().Body())
-	err := params.bindAndValidate(bodyValue, ctx.Query())
-	if err != nil {
-		return tp.NewRerror(s.bindErrCode, s.bindErrMessage, err.Error())
+	rerr := params.bindAndValidate(bodyValue, ctx.Query(), ctx.Swap())
+	if rerr != nil {
+		return rerr
 	}
 	return nil
 }
@@ -132,6 +154,7 @@ func (s *StructArgsBinder) PostReadPullBody(ctx tp.ReadCtx) *tp.Rerror {
 type Params struct {
 	handlerName string
 	params      []*Param
+	binder      *StructArgsBinder
 }
 
 // struct binder parameters'tag
@@ -139,18 +162,20 @@ const (
 	TAG_PARAM        = "param"   // request param tag name
 	TAG_IGNORE_PARAM = "-"       // ignore request param tag value
 	KEY_QUERY        = "query"   // query param(optional), value means parameter(optional)
+	KEY_SWAP         = "swap"    // swap param from the context swap(ctx.Swap()) (optional), value means parameter(optional)
 	KEY_DESC         = "desc"    // request param description
 	KEY_LEN          = "len"     // length range of param's value
 	KEY_RANGE        = "range"   // numerical range of param's value
 	KEY_NONZERO      = "nonzero" // param`s value can not be zero
 	KEY_REGEXP       = "regexp"  // verify the value of the param with a regular expression(param value can not be null)
-	KEY_ERR          = "err"     // the custom error for binding or validating
+	KEY_RERR         = "rerr"    // the custom error code and message for binding or validating
 )
 
-func newParams(handlerName string) *Params {
+func newParams(handlerName string, binder *StructArgsBinder) *Params {
 	return &Params{
 		handlerName: handlerName,
 		params:      make([]*Param, 0),
+		binder:      binder,
 	}
 }
 
@@ -172,9 +197,13 @@ func (p *Params) addFields(parentIndexPath []int, t reflect.Type, v reflect.Valu
 
 		tag, ok := field.Tag.Lookup(TAG_PARAM)
 		if !ok {
-			if canSet && field.Anonymous && field.Type.Kind() == reflect.Struct {
-				if err = p.addFields(indexPath, field.Type, value); err != nil {
-					return err
+			if canSet && field.Anonymous {
+				if field.Type.Kind() == reflect.Struct {
+					if err = p.addFields(indexPath, field.Type, value); err != nil {
+						return err
+					}
+				} else {
+					return fmt.Errorf("%s.%s anonymous field can only be struct type", t.String(), field.Name)
 				}
 			}
 			continue
@@ -221,11 +250,31 @@ func (p *Params) addFields(parentIndexPath []int, t reflect.Type, v reflect.Valu
 			tags:        parsedTags,
 			rawTag:      field.Tag,
 			rawValue:    value,
+			binder:      p.binder,
+		}
+		rerrTag, ok := fd.tags[KEY_RERR]
+		if ok {
+			idx := strings.Index(rerrTag, ":")
+			if idx != -1 {
+				if codeStr := strings.TrimSpace(rerrTag[:idx]); len(codeStr) > 0 {
+					rerrCode, err := strconv.Atoi(codeStr)
+					if err == nil {
+						fd.rerrCode = int32(rerrCode)
+					} else {
+						return fmt.Errorf("%s.%s invalid `rerr` tag (correct example: `<rerr: 100001: Invalid Parameter>`)", t.String(), field.Name)
+					}
+				}
+				fd.rerrMsg = strings.TrimSpace(rerrTag[idx+1:])
+			} else {
+				return fmt.Errorf("%s.%s invalid `rerr` tag (correct example: `<rerr: 100001: Invalid Parameter>`)", t.String(), field.Name)
+			}
 		}
 
-		fd.err = fd.tags[KEY_ERR]
-
-		fd.name, fd.isQuery = parsedTags[KEY_QUERY]
+		if fd.name, ok = parsedTags[KEY_QUERY]; ok {
+			fd.position = KEY_QUERY
+		} else if fd.name, ok = parsedTags[KEY_SWAP]; ok {
+			fd.position = KEY_SWAP
+		}
 		if fd.name == "" {
 			fd.name = goutil.SnakeString(field.Name)
 		}
@@ -254,26 +303,57 @@ func (p *Params) fieldsForBinding(structElem reflect.Value) []reflect.Value {
 	return fields
 }
 
-func (p *Params) bindAndValidate(structValue reflect.Value, queryValues url.Values) (err error) {
-	fields := p.fieldsForBinding(reflect.Indirect(structValue))
+func (p *Params) bindAndValidate(structValue reflect.Value, queryValues url.Values, swap goutil.Map) (rerr *tp.Rerror) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = errors.New("bindAndValidate: " + p.handlerName + " : " + fmt.Sprint(r))
+			rerr = p.binder.errFunc(p.handlerName, "", fmt.Sprint(r))
 		}
 	}()
-
+	var (
+		err    error
+		fields = p.fieldsForBinding(reflect.Indirect(structValue))
+	)
 	for i, param := range p.params {
 		value := fields[i]
-		if param.isQuery {
+		// bind query or swap param
+		switch param.position {
+		case KEY_QUERY:
 			paramValues, ok := queryValues[param.name]
 			if ok {
 				if err = convertAssign(value, paramValues); err != nil {
-					return param.myError(err.Error())
+					return param.fixRerror(p.binder.errFunc(param.handlerName, param.name, err.Error()))
 				}
 			}
+		case KEY_SWAP:
+			paramValue, ok := swap.Load(param.name)
+			if ok {
+				value = reflect.Indirect(value)
+				canSet := value.CanSet()
+				var srcValue reflect.Value
+				if canSet {
+					srcValue = reflect.Indirect(reflect.ValueOf(paramValue))
+					destType := value.Type()
+					srcType := srcValue.Type()
+					canSet = srcType.AssignableTo(destType)
+					if !canSet {
+						if srcType.ConvertibleTo(destType) {
+							srcValue = srcValue.Convert(destType)
+							canSet = srcValue.Type().AssignableTo(destType)
+						}
+					}
+				}
+				if !canSet {
+					return param.fixRerror(p.binder.errFunc(
+						param.handlerName,
+						param.name,
+						value.Type().Name()+" can not be setted"),
+					)
+				}
+				value.Set(srcValue)
+			}
 		}
-		if err = param.validate(value); err != nil {
-			return err
+		if rerr = param.validate(value); rerr != nil {
+			return rerr
 		}
 	}
 	return
@@ -357,12 +437,14 @@ type Param struct {
 	handlerName string // handler name
 	name        string // param name
 	indexPath   []int
-	isQuery     bool              // is query param or not
+	position    string            // param position
 	tags        map[string]string // struct tags for this param
 	verifyFuncs []func(reflect.Value) error
 	rawTag      reflect.StructTag // the raw tag
 	rawValue    reflect.Value     // the raw tag value
-	err         string            // the custom error for binding or validating
+	rerrCode    int32             // the custom error code for binding or validating
+	rerrMsg     string            // the custom error message for binding or validating
+	binder      *StructArgsBinder
 }
 
 const (
@@ -388,18 +470,16 @@ func (param *Param) Description() string {
 
 // validate tests if the param conforms to it's validation constraints specified
 // int the KEY_REGEXP struct tag
-func (param *Param) validate(value reflect.Value) (err error) {
+func (param *Param) validate(value reflect.Value) (rerr *tp.Rerror) {
 	defer func() {
-		p := recover()
-		if p != nil {
-			err = param.myError(fmt.Sprint(p))
-		} else if err != nil {
-			err = param.myError(err.Error())
+		if r := recover(); r != nil {
+			rerr = param.fixRerror(param.binder.errFunc(param.handlerName, param.name, fmt.Sprint(r)))
 		}
 	}()
+	var err error
 	for _, fn := range param.verifyFuncs {
 		if err = fn(value); err != nil {
-			return err
+			return param.fixRerror(param.binder.errFunc(param.handlerName, param.name, err.Error()))
 		}
 	}
 	return nil
@@ -471,7 +551,7 @@ func validateNonZero() (func(value reflect.Value) error, error) {
 	return func(value reflect.Value) error {
 		obj := value.Interface()
 		if obj == reflect.Zero(value.Type()).Interface() {
-			return errors.New("not set")
+			return errors.New("zero value")
 		}
 		return nil
 	}, nil
@@ -576,23 +656,14 @@ func validateRegexp(isStrings bool, reg string) (func(value reflect.Value) error
 	}
 }
 
-// BindOrValidateErrorFunc creates an relational error.
-type BindOrValidateErrorFunc func(handler, param, reason string) error
-
-var bindOrValidateErrorFunc = func(handler, param, reason string) error {
-	return fmt.Errorf(`{"handler": %q, "param": %q, "reason": %q}`, handler, param, reason)
-}
-
-// SetBindOrValidateErrorFunc
-func SetBindOrValidateErrorFunc(fn BindOrValidateErrorFunc) {
-	bindOrValidateErrorFunc = fn
-}
-
-func (param *Param) myError(reason string) error {
-	if param.err != "" {
-		reason = param.err
+func (param *Param) fixRerror(rerr *tp.Rerror) *tp.Rerror {
+	if param.rerrMsg != "" {
+		rerr.SetMessage(param.rerrMsg)
 	}
-	return bindOrValidateErrorFunc(param.handlerName, param.name, reason)
+	if param.rerrCode != 0 {
+		rerr.Code = param.rerrCode
+	}
+	return rerr
 }
 
 func convertAssign(dest reflect.Value, src []string) (err error) {

@@ -6,7 +6,7 @@
 ## Install
 
 ```sh
-go get -u github.com/henrylee2cn/tp-ext/...
+go get -u -f -d github.com/henrylee2cn/tp-ext/...
 ```
 
 ## Codec
@@ -21,6 +21,7 @@ package|import|description
 [binder](https://github.com/henrylee2cn/tp-ext/blob/master/plugin-binder)|`import binder "github.com/henrylee2cn/tp-ext/plugin-binder"`|Parameter Binding Verification for Struct Handler
 [heartbeat](https://github.com/henrylee2cn/tp-ext/blob/master/plugin-heartbeat)|`import heartbeat "github.com/henrylee2cn/tp-ext/plugin-heartbeat"`|A generic timing heartbeat plugin
 [ignoreCase](https://github.com/henrylee2cn/tp-ext/blob/master/plugin-ignoreCase)|`import ignoreCase "github.com/henrylee2cn/tp-ext/plugin-ignoreCase"`|Dynamically ignoring the case of path
+[secure](https://github.com/henrylee2cn/tp-ext/blob/master/plugin-secure)|`import secure "github.com/henrylee2cn/tp-ext/plugin-secure"`|Encrypting/decrypting the packet body
 
 ## Protocol
 
@@ -40,5 +41,5 @@ package|import|description
 
 package|import|description
 ----|------|-----------
-[cliSession](https://github.com/henrylee2cn/tp-ext/blob/master/mod-cliSession)|`import cliSession "github.com/henrylee2cn/tp-ext/mod-cliSession"`|Client session which has connection pool
+[cliSession](https://github.com/henrylee2cn/tp-ext/blob/master/mod-cliSession)|`import cliSession "github.com/henrylee2cn/tp-ext/mod-cliSession"`|Client session with a high efficient and load balanced connection pool
 [websocket](https://github.com/henrylee2cn/tp-ext/blob/master/mod-websocket)|`import websocket "github.com/henrylee2cn/tp-ext/mod-websocket"`|Makes the Teleport framework compatible with websocket protocol as specified in RFC 6455

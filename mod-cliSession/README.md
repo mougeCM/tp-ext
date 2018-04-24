@@ -1,6 +1,13 @@
 ## cliSession
 
-Client session which has connection pool.
+Client session with a high efficient and load balanced connection pool.
+
+### Feature
+
+- Non exclusive, shared connection pool
+- Making full use of the asynchronous communication advantages of each connection
+- Load balancing mechanism of traffic level
+- Real-time monitoring of connection status
 
 ### Usage
 
@@ -35,7 +42,7 @@ func TestCliSession(t *testing.T) {
 		ListenAddress: ":9090",
 	})
 	srv.RoutePull(new(P))
-	go srv.Listen()
+	go srv.ListenAndServe()
 	time.Sleep(time.Second)
 
 	cli := cliSession.New(

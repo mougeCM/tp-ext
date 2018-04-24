@@ -18,15 +18,17 @@
 package websocket
 
 import (
+	"net"
 	"path"
 	"strings"
 
 	tp "github.com/henrylee2cn/teleport"
+	"github.com/henrylee2cn/teleport/socket"
 	ws "github.com/henrylee2cn/tp-ext/mod-websocket/websocket"
 )
 
 // NewDialPlugin creates a websocket plugin for client.
-func NewDialPlugin(pattern string) tp.PostDialPlugin {
+func NewDialPlugin(pattern string) tp.Plugin {
 	pattern = path.Join("/", strings.TrimRight(pattern, "/"))
 	if pattern == "/" {
 		pattern = ""
@@ -46,23 +48,27 @@ func (*clientPlugin) Name() string {
 	return "websocket"
 }
 
-func (c *clientPlugin) PostDial(sess tp.EarlySession) *tp.Rerror {
+func (c *clientPlugin) PostDial(sess tp.PreSession) *tp.Rerror {
 	var location, origin string
 	if sess.Peer().TlsConfig() == nil {
-		location = "ws://" + sess.RemoteIp() + c.pattern
-		origin = "ws://" + sess.LocalIp() + c.pattern
+		location = "ws://" + sess.RemoteAddr().String() + c.pattern
+		origin = "ws://" + sess.LocalAddr().String() + c.pattern
 	} else {
-		location = "wss://" + sess.RemoteIp() + c.pattern
-		origin = "wss://" + sess.LocalIp() + c.pattern
+		location = "wss://" + sess.RemoteAddr().String() + c.pattern
+		origin = "wss://" + sess.LocalAddr().String() + c.pattern
 	}
 	cfg, err := ws.NewConfig(location, origin)
 	if err != nil {
 		return tp.NewRerror(tp.CodeDialFailed, "upgrade to websocket failed", err.Error())
 	}
-	conn, err := ws.NewClient(cfg, sess.Conn())
-	if err != nil {
-		return tp.NewRerror(tp.CodeDialFailed, "upgrade to websocket failed", err.Error())
-	}
-	sess.ResetConn(conn, NewWsProtoFunc(sess.GetProtoFunc()))
-	return nil
+	var rerr *tp.Rerror
+	sess.ModifySocket(func(conn net.Conn) (net.Conn, socket.ProtoFunc) {
+		conn, err := ws.NewClient(cfg, conn)
+		if err != nil {
+			rerr = tp.NewRerror(tp.CodeDialFailed, "upgrade to websocket failed", err.Error())
+			return nil, nil
+		}
+		return conn, NewWsProtoFunc(sess.GetProtoFunc())
+	})
+	return rerr
 }
